@@ -1,0 +1,153 @@
+{
+  "name": "openchamber-bitbucket-dc",
+  "version": "0.1.0",
+  "description": "OpenChamber source-control provider extension for Bitbucket Data Center",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/twostone/openchamber-bitbucket-dc.git"
+  },
+  "homepage": "https://github.com/twostone/openchamber-bitbucket-dc#readme",
+  "bugs": {
+    "url": "https://github.com/twostone/openchamber-bitbucket-dc/issues"
+  },
+  "files": [
+    "service/main.js",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --platform=node --format=esm --target=node22 --outfile=service/main.js",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "pack": "npm run build && rm -f openchamber-bitbucket-dc.zip && zip -r openchamber-bitbucket-dc.zip package.json icon.svg README.md LICENSE service/main.js"
+  },
+  "openchamber": {
+    "apiVersion": 1,
+    "engines": {
+      "openchamber": ">=2.7.2"
+    },
+    "contributes": {
+      "panel": {
+        "id": "bitbucket-dc",
+        "name": "Bitbucket Data Center",
+        "icon": "icon.svg"
+      },
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host",
+        "permissions": {
+          "exec": [
+            "git"
+          ]
+        },
+        "provides": [
+          "source-control"
+        ]
+      },
+      "sourceControl": {
+        "wire": 1,
+        "label": "Bitbucket Data Center",
+        "terminology": {
+          "changeRequest": "pullRequest",
+          "ci": "checks"
+        },
+        "referencePrefix": {
+          "changeRequest": "#",
+          "issue": "#"
+        },
+        "repositoryPath": "namespace/name",
+        "instances": {
+          "defaultInstances": [],
+          "custom": true,
+          "allowLoopbackHttp": true,
+          "allowPort": true,
+          "placeholder": "https://bitbucket.example.com"
+        },
+        "capabilities": {
+          "projects": true,
+          "issues": false,
+          "changeRequests": true,
+          "draftChangeRequests": true,
+          "draftConversion": true,
+          "merge": {
+            "methods": [
+              "merge",
+              "squash",
+              "rebase"
+            ]
+          },
+          "ci": true,
+          "comments": true,
+          "reviews": true,
+          "reviewModel": "verdict",
+          "state": true,
+          "labels": false,
+          "reviewers": true,
+          "changeRequestPatch": true,
+          "liveSummaries": true
+        },
+        "token": {
+          "header": "authorization",
+          "scheme": "bearer",
+          "scopes": [
+            "PROJECT_READ",
+            "REPO_WRITE"
+          ],
+          "createPath": "/plugins/servlet/access-tokens/manage"
+        },
+        "transport": {
+          "httpsUsername": {
+            "kind": "login"
+          },
+          "appendDotGitToHttpsClone": true
+        },
+        "limits": {
+          "commentMaxLength": 32768,
+          "reviewerId": "login",
+          "labelsMax": 0,
+          "reviewersMax": 50
+        },
+        "trackedItems": {
+          "batchLimit": 20
+        },
+        "presentation": {
+          "abbreviation": "PR",
+          "promptNoun": "pull request",
+          "sharedNumberSpace": false,
+          "iconPath": "M2.65 3C2.1 3 1.68 3.49 1.77 4.03L4.5 20.22C4.61 20.86 5.16 21.33 5.81 21.33H18.42C18.92 21.33 19.35 20.97 19.44 20.47L22.23 4.03C22.32 3.49 21.9 3 21.35 3H2.65ZM14.42 15.17H9.67L8.38 8.42H15.79L14.42 15.17Z",
+          "urls": {
+            "changeRequest": [
+              "/projects/{namespace+}/repos/{repo}/pull-requests/{number}",
+              "/users/{namespace+}/repos/{repo}/pull-requests/{number}",
+              "/stash/projects/{namespace+}/repos/{repo}/pull-requests/{number}",
+              "/stash/users/{namespace+}/repos/{repo}/pull-requests/{number}",
+              "/bitbucket/projects/{namespace+}/repos/{repo}/pull-requests/{number}",
+              "/bitbucket/users/{namespace+}/repos/{repo}/pull-requests/{number}"
+            ],
+            "issue": []
+          },
+          "features": {
+            "authorCanReview": false,
+            "issueCloseReason": false,
+            "submitRequirements": true
+          },
+          "changeRequestTemplates": [
+            ".bitbucket/pull_request_template.md",
+            "pull_request_template.md",
+            ".github/pull_request_template.md"
+          ]
+        }
+      }
+    }
+  },
+  "devDependencies": {
+    "@openchamber/sdk": "^2.7.2",
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.2",
+    "zod": "^4.3.6"
+  }
+}
