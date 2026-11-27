@@ -1119,10 +1119,10 @@ function selectorOf(value) {
   const id = typeof obj.id === "string" ? obj.id : void 0;
   return owner && name ? { id, owner, name } : null;
 }
-function contextSelectorOf(context) {
-  if (!context || typeof context !== "object" || Array.isArray(context)) return null;
-  const ctx = context;
-  return selectorOf(ctx.project) ?? (ctx.target && typeof ctx.target === "object" ? selectorOf(ctx.target.project) : null);
+function isLinkedRead(input) {
+  if (input.linked === true) return true;
+  if (!input.context || typeof input.context !== "object" || Array.isArray(input.context)) return false;
+  return input.context.linked === true;
 }
 async function fetchRepo(bb, ident) {
   const tryKey = async (key) => {
@@ -1153,9 +1153,50 @@ async function fetchDefaultBranch(bb, key, slug) {
     throw err;
   }
 }
-async function resolveBoundRepo(call, input, explicitSelector, includeDefaultBranch = false) {
+async function resolveBoundRepo(call, input, explicitSelector, opts = {}) {
+  const { includeDefaultBranch = false, allowLinked = false } = opts;
   const directory = typeof input.directory === "string" ? input.directory : "";
   const remoteName = typeof input.remote === "string" && input.remote ? input.remote : "origin";
+  if (allowLinked && explicitSelector && isLinkedRead(input)) {
+    const wantedOwner = (explicitSelector.owner ?? "").trim();
+    const wantedKey2 = apiProjectKeyOfOwner(wantedOwner);
+    const wantedSlug2 = (explicitSelector.name ?? explicitSelector.repo ?? "").trim();
+    if (!wantedKey2 || !wantedSlug2) {
+      throw new CallError("Invalid repository selector.", "BAD_REQUEST", 400);
+    }
+    let ctxHint = null;
+    if (directory && store.get(call.origin) === void 0) {
+      try {
+        ctxHint = parseRemote(await readRemoteUrl(directory, remoteName), call.originUrl).ctxHint;
+      } catch {
+        ctxHint = null;
+      }
+    }
+    const det2 = await detectContextPath({
+      store,
+      forge: call.forge,
+      handle: call.handle,
+      origin: call.origin,
+      hint: ctxHint
+    });
+    call.ctx = det2.ctx;
+    const bb2 = new BB(det2.ctx, call.handle, call.forge);
+    const linkedIdent = {
+      dtoOwner: wantedOwner,
+      repo: wantedSlug2,
+      apiKey: wantedKey2
+    };
+    const linkedGot = await fetchRepo(bb2, linkedIdent);
+    const linkedDefault = includeDefaultBranch ? await fetchDefaultBranch(bb2, linkedGot.apiKey, linkedGot.repo.slug) : null;
+    return {
+      bb: bb2,
+      ident: linkedIdent,
+      raw: linkedGot.repo,
+      apiKey: linkedGot.apiKey,
+      project: mapProject(call, linkedGot.repo, wantedOwner, { defaultBranch: linkedDefault }),
+      defaultBranch: linkedDefault
+    };
+  }
   const rawRemote = await readRemoteUrl(directory, remoteName);
   const parsed = parseRemote(rawRemote, call.originUrl);
   const det = await detectContextPath({
@@ -1167,7 +1208,7 @@ async function resolveBoundRepo(call, input, explicitSelector, includeDefaultBra
   });
   call.ctx = det.ctx;
   const bb = new BB(det.ctx, call.handle, call.forge);
-  const primaryIdent = repoIdentFrom(contextSelectorOf(input.context), parsed, remoteName);
+  const primaryIdent = repoIdentFrom(null, parsed, remoteName);
   const primaryGot = await fetchRepo(bb, primaryIdent);
   const defaultBranch = includeDefaultBranch ? await fetchDefaultBranch(bb, primaryGot.apiKey, primaryGot.repo.slug) : null;
   const primaryProject = mapProject(call, primaryGot.repo, primaryIdent.dtoOwner, {
@@ -1365,7 +1406,9 @@ async function hChangeRequestStatus(req) {
   const input = req.input;
   const branch = String(input.branch ?? "");
   const remoteName = typeof input.remote === "string" && input.remote ? input.remote : null;
-  const { bb, raw, apiKey, project, defaultBranch } = await resolveBoundRepo(call, input, null, true);
+  const { bb, raw, apiKey, project, defaultBranch } = await resolveBoundRepo(call, input, null, {
+    includeDefaultBranch: true
+  });
   if (!branch.trim()) {
     return {
       identity: call.identity,
@@ -1484,7 +1527,7 @@ async function hChangeRequestContext(req) {
   const call = makeCall(req);
   const input = req.input;
   const selector = selectorOf(input.project);
-  const { bb, raw, apiKey, project } = await resolveBoundRepo(call, input, selector);
+  const { bb, raw, apiKey, project } = await resolveBoundRepo(call, input, selector, { allowLinked: true });
   const number = Number(input.number ?? 0);
   const includeDiff = input.includeDiff === true;
   const includeTimeline = input.includeTimeline === true;
@@ -1602,7 +1645,7 @@ async function hListReviewerCandidates(req) {
 async function hReadChangeRequestPatch(req) {
   const call = makeCall(req);
   const selector = selectorOf(req.input.sourceRepo);
-  const { bb, raw, apiKey, project } = await resolveBoundRepo(call, req.input, selector);
+  const { bb, raw, apiKey, project } = await resolveBoundRepo(call, req.input, selector, { allowLinked: true });
   const number = Number(req.input.number ?? 0);
   const patch = await fetchDiffText(bb, apiKey, raw.slug, number);
   return { patch, meta: { owner: project.owner, repo: project.name, number } };
@@ -1618,7 +1661,7 @@ async function hReadChangeRequestFile(req) {
   const call = makeCall(req);
   const input = req.input;
   const selector = selectorOf(input.sourceRepo);
-  const { bb, raw, apiKey } = await resolveBoundRepo(call, input, selector);
+  const { bb, raw, apiKey } = await resolveBoundRepo(call, input, selector, { allowLinked: true });
   const number = Number(input.number ?? 0);
   const pr = await fetchPr(bb, apiKey, raw.slug, number);
   const headSha = pr.fromRef?.latestCommit ?? "";

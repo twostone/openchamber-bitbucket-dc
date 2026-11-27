@@ -122,6 +122,16 @@ async function setUp(): Promise<void> {
     projectName: 'Alice Personal',
     defaultBranch: 'main',
   });
+  st.projects.set(4, { key: 'OTHER', name: 'Other Project' });
+  const otherSvc = addRepo({
+    id: 40,
+    slug: 'service-b',
+    name: 'Service B',
+    projectKey: 'OTHER',
+    projectId: 4,
+    projectName: 'Other Project',
+    defaultBranch: 'main',
+  });
 
   const addPr = (over: Partial<PR> & { id: number }): PR => {
     const now = Date.now();
@@ -294,6 +304,24 @@ async function setUp(): Promise<void> {
   st.files.set(`10:${BASE}:src/util.ts`, 'line one\nold line\nline four\n');
   st.files.set(`10:${FA}:src/util.ts`, 'line one\nnew line\nextra line\nline four\n');
   st.files.set(`10:${FA}:notes.md`, '# Notes\nhello world\n');
+
+  const OTHER_HEAD = 'ffffffffffffffffffffffffffffffffffffffff';
+  const OTHER_BASE = '7777777777777777777777777777777777777777';
+  addPr({
+    id: 301,
+    title: 'Cross-repo linked PR',
+    fromRef: mkRepoRef('feat/other', OTHER_HEAD, otherSvc, fake.origin, '/stash'),
+    toRef: mkRepoRef('main', MASTER, otherSvc, fake.origin, '/stash'),
+    author: bob,
+  });
+  st.diffs.set(
+    301,
+    ['diff --git a/README.md b/README.md', '--- a/README.md', '+++ b/README.md', '@@ -1 +1 @@', '-old', '+new'].join('\n'),
+  );
+  st.changes.set(301, [{ path: { toString: 'README.md' }, type: 'MODIFY', nodeType: 'FILE' }]);
+  st.mergeBases.set(`40:${OTHER_HEAD}:${MASTER}`, OTHER_BASE);
+  st.files.set(`40:${OTHER_BASE}:README.md`, 'old\n');
+  st.files.set(`40:${OTHER_HEAD}:README.md`, 'new\n');
 
   const base = mkdtempSync(join(tmpdir(), 'oc-bbdc-test-'));
   dirSsh = join(base, 'git-ssh');
@@ -655,6 +683,104 @@ test('personal repository (~alice_example.test) resolves over SSH and /users/{sl
     'projectBranches',
   );
   assert.deepEqual(branches, ['main']);
+});
+
+test('linked reads resolve cross-repo PR context, patch, and file outside the fork network while mutations stay blocked', async () => {
+  const crossProject = { owner: 'OTHER', name: 'service-b' };
+
+  // 1. Unlinked cross-repo read rejects with NOT_IN_NETWORK (triggers OpenChamber resolveReferenceLink retry)
+  const unlinked = await rpc(
+    'changeRequestContext',
+    readInput(dirSsh, { number: 301, project: crossProject, includeDiff: true, includeCIDetails: false, includeTimeline: false }),
+  );
+  assert.equal(unlinked.ok, false);
+  assert.equal(unlinked.error?.code, 'NOT_IN_NETWORK');
+  assert.equal(unlinked.error?.status, 404);
+
+  // 2. Retry with context.linked = true succeeds and preserves requested owner
+  const linkedCtx = okData(
+    await rpc('changeRequestContext', {
+      directory: dirSsh,
+      remote: 'origin',
+      context: { ...SSH_BINDING_CTX, directory: dirSsh, linked: true },
+      number: 301,
+      project: crossProject,
+      includeDiff: true,
+      includeCIDetails: false,
+      includeTimeline: false,
+    }),
+    'changeRequestContext',
+  );
+  assert.equal(linkedCtx.project.owner, 'OTHER');
+  assert.equal(linkedCtx.project.name, 'service-b');
+  assert.equal(linkedCtx.changeRequest.number, 301);
+  assert.equal(linkedCtx.changeRequest.title, 'Cross-repo linked PR');
+  assert.equal(linkedCtx.files.length, 1);
+  assert.equal(linkedCtx.files[0].path, 'README.md');
+
+  // 3. Directory-free linked read (`directory: ''`) also resolves directly against Bitbucket
+  const dirFree = okData(
+    await rpc('changeRequestContext', {
+      directory: '',
+      remote: '',
+      context: { directory: '', repositoryId: '', bindingRevision: 0, primaryRemote: '', linked: true },
+      number: 301,
+      project: crossProject,
+      includeDiff: false,
+      includeCIDetails: false,
+      includeTimeline: false,
+    }),
+    'changeRequestContext',
+  );
+  assert.equal(dirFree.changeRequest.number, 301);
+
+  // 4. Patch & file reads honor top-level `linked: true` (as sent by OpenChamber provider-routes.ts)
+  const unlinkedPatch = await rpc(
+    'readChangeRequestPatch',
+    readInput(dirSsh, { number: 301, sourceRepo: { owner: 'OTHER', repo: 'service-b' } }),
+  );
+  assert.equal(unlinkedPatch.ok, false);
+  assert.equal(unlinkedPatch.error?.code, 'NOT_IN_NETWORK');
+
+  const linkedPatch = okData(
+    await rpc(
+      'readChangeRequestPatch',
+      readInput(dirSsh, { number: 301, sourceRepo: { owner: 'OTHER', repo: 'service-b' }, linked: true }),
+    ),
+    'readChangeRequestPatch',
+  );
+  assert.deepEqual(linkedPatch.meta, { owner: 'OTHER', repo: 'service-b', number: 301 });
+  assert.ok(linkedPatch.patch.includes('diff --git a/README.md b/README.md'));
+
+  const linkedFile = okData(
+    await rpc(
+      'readChangeRequestFile',
+      readInput(dirSsh, {
+        number: 301,
+        sourceRepo: { owner: 'OTHER', repo: 'service-b' },
+        path: 'README.md',
+        status: 'M',
+        linked: true,
+      }),
+    ),
+    'readChangeRequestFile',
+  );
+  assert.equal(linkedFile.original, 'old\n');
+  assert.equal(linkedFile.modified, 'new\n');
+
+  // 5. Mutations NEVER honor linked: true
+  const blockedMut = await rpc('mutation.resolveTarget', {
+    kind: 'change-request-comment',
+    context: {
+      ...SSH_BINDING_CTX,
+      directory: dirSsh,
+      linked: true,
+      target: { project: crossProject, number: 301 },
+    },
+    input: { body: 'should fail' },
+  });
+  assert.equal(blockedMut.ok, false);
+  assert.equal(blockedMut.error?.code, 'NOT_IN_NETWORK');
 });
 
 test('mutations: create (empty reviewers), update (preserves reviewers!), draft/ready, reviewers (names), review (slug), state & merge (method)', async () => {
